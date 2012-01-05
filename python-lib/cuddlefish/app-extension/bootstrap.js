@@ -72,7 +72,7 @@ function setDefaultPrefs() {
           branch.setBoolPref(key, val);
           break;
         case "number":
-          if (value % 1 == 0) // number must be a integer, otherwise ignore it
+          if (val % 1 == 0) // number must be a integer, otherwise ignore it
             branch.setIntPref(key, val);
           break;
         case "string":
@@ -88,9 +88,13 @@ function setDefaultPrefs() {
       ioService.newURI(URI, null, null));
 
   // if there is a prefs.js file, then import the default prefs
-  if (uri.QueryInterface(Ci.nsIFileURL).file.exists()) {
+  try {
     // setup default prefs
     mozIJSSubScriptLoader.loadSubScript(uri.spec, prefLoaderScope);
+  }
+  // errors here should not kill addon
+  catch (e) {
+    Cu.reportError(e);
   }
 }
 
@@ -105,7 +109,7 @@ function getAppStartupTopic() {
     Mozilla: '{86c18b42-e466-45a9-ae7a-9b95ba6f5640}',
     Sunbird: '{718e30fb-e89b-41dd-9da7-e25a45638b28}',
     SeaMonkey: '{92650c4d-4b8e-4d2a-b7eb-24ecf4f6b63a}',
-    Fennec: '{a23983c0-fd0e-11dc-95ff-0800200c9a66}',
+    Fennec: '{aa3c5121-dab2-40e2-81ca-7ea25febc110}',
     Thunderbird: '{3550f703-e582-4d05-9a08-453d09bdfdc6}'
   };
 
@@ -113,11 +117,12 @@ function getAppStartupTopic() {
 
   switch (id) {
     case ids.Firefox:
-    case ids.Fennec:
     case ids.SeaMonkey:
       return 'sessionstore-windows-restored';
     case ids.Thunderbird:
       return 'mail-startup-done';
+    // Temporary, until Fennec Birch will support sessionstore event
+    case ids.Fennec:
     default:
       return 'final-ui-startup';
   }
@@ -149,21 +154,6 @@ function on(topic) {
   }
 }
 
-/**
- * Maps each path - value from `resources` hash in the resources protocol
- * handler with an associated key. Each path is resolved relative to the given
- * `root` path.
- */
-function mapResources(resources) {
-  Object.keys(resources).forEach(function(id) {
-    let path = resources[id];
-    let uri = Array.isArray(path) ? URI + '/' + path.join('/')
-                                  : 'file://' + path;
-    uri = ioService.newURI(uri + '/', null, null);
-    resourceHandler.setSubstitution(id, uri);
-  });
-}
-
 // We don't do anything on install & uninstall yet, but in a future
 // we should allow add-ons to cleanup after uninstall.
 function install(data, reason) {}
@@ -179,13 +169,29 @@ function startup(data, reason) {
   let options = JSON.parse(readURI(URI + './harness-options.json'));
   options.loadReason = REASON[reason];
 
-  // TODO: This is unnecessary overhead per add-on instance. Manifest should
-  // probably contain paths relative to add-on root to avoid this, but that
-  // requires simpler package layout that is being worked under the bug-660629.
-  mapResources(options.resources);
+  // URI for the root of the XPI file.
+  // 'jar:' URI if the addon is packed, 'file:' URI otherwise.
+  // (Used by l10n module in order to fetch `locale` folder)
+  options.rootURI = data.resourceURI.spec;
+
+  // Register a new resource "domain" for this addon which is mapping to
+  // XPI's `resources` folder.
+  // Generate the domain name by using jetpack ID, which is the extension ID
+  // by stripping common characters that doesn't work as a domain name:
+  let uuidRe =
+    /^\{([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\}$/;
+  let domain = options.jetpackID.toLowerCase()
+                            .replace(/@/g, "-at-")
+                            .replace(/\./g, "-dot-")
+                            .replace(uuidRe, "$1");
+
+  let resourcesUri = ioService.newURI(URI + '/resources/', null, null);
+  resourceHandler.setSubstitution(domain, resourcesUri);
+  options.uriPrefix = "resource://" + domain + "/";
 
   // Import loader module using `Cu.imports` and bootstrap module loader.
-  loader = Cu.import(options.loader).Loader.new(options);
+  let loaderUri = options.uriPrefix + options.loader;
+  loader = Cu.import(loaderUri).Loader.new(options);
 
   // Creating a promise, that will be delivered once application is ready.
   // If application is at startup then promise is delivered on
@@ -197,7 +203,7 @@ function startup(data, reason) {
   // on add-on.
   promise(function() {
     try {
-      loader.spawn(options.main, options.mainURI);
+      loader.spawn(options.main, options.mainPath);
     } catch (error) {
       // If at this stage we have an error only thing we can do is report about
       // it via error console. Keep in mind that error won't automatically show
