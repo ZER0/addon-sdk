@@ -40,6 +40,8 @@ const Symbiont = Worker.resolve({
         this.contentURL = options.contentURL;
     if ('contentScriptWhen' in options)
       this.contentScriptWhen = options.contentScriptWhen;
+    if ('contentScriptOptions' in options)
+      this.contentScriptOptions = options.contentScriptOptions;
     if ('contentScriptFile' in options)
       this.contentScriptFile = options.contentScriptFile;
     if ('contentScript' in options)
@@ -99,7 +101,7 @@ const Symbiont = Worker.resolve({
     // one of our addon folder and if no content script are defined. bug 612726
     let isDataResource =
       typeof this._contentURL == "string" &&
-      this._contentURL.indexOf(require("@packaging").uriPrefix) == 0;
+      this._contentURL.indexOf(require("@packaging").prefixURI) == 0;
     let hasContentScript =
       (Array.isArray(this.contentScript) ? this.contentScript.length > 0
                                              : !!this.contentScript) ||
