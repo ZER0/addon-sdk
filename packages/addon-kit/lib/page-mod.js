@@ -10,28 +10,15 @@ const { Worker, Loader } = require('api-utils/content');
 const { EventEmitter } = require('api-utils/events');
 const { List } = require('api-utils/list');
 const { Registry } = require('api-utils/utils/registry');
-const xulApp = require("api-utils/xul-app");
 const { MatchPattern } = require('api-utils/match-pattern');
 const { validateOptions : validate } = require('api-utils/api-utils');
 const { validationAttributes } = require('api-utils/content/loader');
 const { Cc, Ci } = require('chrome');
 const { merge } = require('api-utils/utils/object');
-
-// Whether or not the host application dispatches a document-element-inserted
-// notification when the document element is inserted into the DOM of a page.
-// The notification was added in Gecko 2.0b6, it's a better time to attach
-// scripts with contentScriptWhen "start" than content-document-global-created,
-// since libraries like jQuery assume the presence of the document element.
-const HAS_DOCUMENT_ELEMENT_INSERTED =
-        xulApp.versionInRange(xulApp.platformVersion, "2.0b6", "*");
-const ON_CONTENT = HAS_DOCUMENT_ELEMENT_INSERTED ? 'document-element-inserted' :
-                   'content-document-global-created';
-
-// Workaround bug 642145: document-element-inserted is fired multiple times.
-// This bug is fixed in Firefox 4.0.1, but we want to keep FF 4.0 compatibility
-// Tracking bug 641457. To be removed when 4.0 has disappeared from earth.
-const HAS_BUG_642145_FIXED =
-        xulApp.versionInRange(xulApp.platformVersion, "2.0.1", "*");
+const { windowIterator } = require("window-utils");
+const { isBrowser } = require('api-utils/window/utils');
+const { getTabs, getTabContentWindow, getTabForContentWindow,
+        getURI: getTabURI } = require("api-utils/tabs/utils");
 
 const styleSheetService = Cc["@mozilla.org/content/style-sheet-service;1"].
                             getService(Ci.nsIStyleSheetService);
@@ -98,6 +85,7 @@ function readURI(uri) {
 const PageMod = Loader.compose(EventEmitter, {
   on: EventEmitter.required,
   _listeners: EventEmitter.required,
+  attachTo: [],
   contentScript: Loader.required,
   contentScriptFile: Loader.required,
   contentScriptWhen: Loader.required,
@@ -121,6 +109,8 @@ const PageMod = Loader.compose(EventEmitter, {
       this.on('attach', options.onAttach);
     if ('onError' in options)
       this.on('error', options.onError);
+    if ('attachTo' in options)
+      this.attachTo = options.attachTo;
 
     let include = options.include;
     let rules = this.include = Rules();
@@ -154,6 +144,11 @@ const PageMod = Loader.compose(EventEmitter, {
     pageModManager.add(this._public);
 
     this._loadingWindows = [];
+
+    // `_applyOnExistingDocuments` has to be called after `pageModManager.add()`
+    // otherwise its calls to `_onContent` method won't do anything.
+    if ('attachTo' in options && options.attachTo.indexOf('existing') !== -1)
+      this._applyOnExistingDocuments();
   },
 
   destroy: function destroy() {
@@ -172,18 +167,38 @@ const PageMod = Loader.compose(EventEmitter, {
 
   _loadingWindows: [],
 
+  _applyOnExistingDocuments: function _applyOnExistingDocuments() {
+    let mod = this;
+    // Returns true if the tab match one rule
+    function isMatchingURI(uri) {
+      // Use Array.some as `include` isn't a native array
+      return Array.some(mod.include, function (rule) {
+        return RULES[rule].test(uri);
+      });
+    }
+    getAllTabs().
+      filter(function (tab) {
+        return isMatchingURI(getTabURI(tab));
+      }).
+      forEach(function (tab) {
+        // Fake a newly created document
+        mod._onContent(getTabContentWindow(tab));
+      });
+  },
+
   _onContent: function _onContent(window) {
     // not registered yet
     if (!pageModManager.has(this))
       return;
 
-    if (!HAS_BUG_642145_FIXED) {
-      if (this._loadingWindows.indexOf(window) != -1)
-        return;
-      this._loadingWindows.push(window);
-    }
-
-    if ('start' == this.contentScriptWhen) {
+    // Immediatly evaluate content script if the document state is already
+    // matching contentScriptWhen expectations
+    let state = window.document.readyState;
+    if ('start' === this.contentScriptWhen ||
+        // Is `load` event already dispatched?
+        'complete' === state ||
+        // Is DOMContentLoaded already dispatched and waiting for it?
+        ('ready' === this.contentScriptWhen && state === 'interactive') ) {
       this._createWorker(window);
       return;
     }
@@ -210,12 +225,6 @@ const PageMod = Loader.compose(EventEmitter, {
     let self = this;
     worker.once('detach', function detach() {
       worker.destroy();
-
-      if (!HAS_BUG_642145_FIXED) {
-        let idx = self._loadingWindows.indexOf(window);
-        if (idx != -1)
-          self._loadingWindows.splice(idx, 1);
-      }
     });
   },
   _onRuleAdd: function _onRuleAdd(url) {
@@ -294,24 +303,29 @@ const PageModManager = Registry.resolve({
   constructor: function PageModRegistry(constructor) {
     this._init(PageMod);
     observers.add(
-      ON_CONTENT, this._onContentWindow = this._onContentWindow.bind(this)
+      'document-element-inserted',
+      this._onContentWindow = this._onContentWindow.bind(this)
     );
   },
   _destructor: function _destructor() {
-    observers.remove(ON_CONTENT, this._onContentWindow);
+    observers.remove('document-element-inserted', this._onContentWindow);
     this._removeAllListeners();
     for (let rule in RULES) {
       delete RULES[rule];
     }
     this._registryDestructor();
   },
-  _onContentWindow: function _onContentWindow(domObj) {
-    let window = HAS_DOCUMENT_ELEMENT_INSERTED ? domObj.defaultView : domObj;
+  _onContentWindow: function _onContentWindow(document) {
+    let window = document.defaultView;
     // XML documents don't have windows, and we don't yet support them.
     if (!window)
       return;
+    // We apply only on documents in tabs of Firefox
+    if (!getTabForContentWindow(window))
+      return;
+
     for (let rule in RULES)
-      if (RULES[rule].test(window.document.URL))
+      if (RULES[rule].test(document.URL))
         this._emit(rule, window);
   },
   off: function off(topic, listener) {
@@ -321,3 +335,15 @@ const PageModManager = Registry.resolve({
   }
 });
 const pageModManager = PageModManager();
+
+// Returns all tabs on all currently opened windows
+function getAllTabs() {
+  let tabs = [];
+  // Iterate over all chrome windows
+  for (let window in windowIterator()) {
+    if (!isBrowser(window))
+      continue;
+    tabs = tabs.concat(getTabs(window));
+  }
+  return tabs;
+}
