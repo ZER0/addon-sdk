@@ -9,32 +9,24 @@ const { merge } = require("../utils/object");
 const { NetUtil } = Cu.import("resource://gre/modules/NetUtil.jsm", {});
 
 /**
- * Reads a channel synchronously with the charset given, and returns a resolved
- * promise.
+ * Open a channel synchronously for the URI given, with an optional charset, and
+ * returns a resolved promise if succeed; rejected promise otherwise.
  */
-function readChannel(channel, charset) {
-  let stream;
-
+function readSync(uri, charset) {
   try {
-    stream = channel.open();
+    return resolve(readURISync(uri, charset));
   }
   catch (e) {
-    let uri = channel.originalURI.spec;
     return reject("Failed to read: '" + uri + "' (Error Code: " + e.result + ")");
   }
-
-  let count = stream.available();
-  let data = NetUtil.readInputStreamToString(stream, count, { charset : charset });
-
-  stream.close();
-
-  return resolve(data);
 }
 
 /**
- * Reads a channel asynchronously with the charset given, and returns a promise.
+ * Open a channel synchronously for the URI given, with an optional charset, and
+ * returns a promise.
  */
-function readChannelAsync(channel, charset) {
+function readAsync(uri, charset) {
+  let channel = NetUtil.newChannel(uri, charset, null);
 
   let { promise, resolve, reject } = defer();
   let data = "";
@@ -50,7 +42,6 @@ function readChannelAsync(channel, charset) {
 	    if (components.isSuccessCode(result)) {
         resolve(data);
       } else {
-        let uri = channel.originalURI.spec;
         reject("Failed to read: '" + uri + "' (Error Code: " + result + ")");
       }
     }
@@ -67,6 +58,9 @@ function readChannelAsync(channel, charset) {
  * @param [options] {object} This parameter can have any or all of the following
  * fields: `sync`, `charset`. By default the `charset` is set to 'UTF-8'.
  *
+ * @returns {promise}  The promise that will be resolved with the content of the
+ *          URL given.
+  *
  * @example
  *  let promise = readURI('resource://gre/modules/NetUtil.jsm', {
  *    sync: true,
@@ -79,11 +73,38 @@ function readURI(uri, options) {
     sync: false
   }, options);
 
-  let channel = NetUtil.newChannel(uri, options.charset, null);
-
   return options.sync 
-    ? readChannel(channel, options.charset)
-    : readChannelAsync(channel, options.charset);
+    ? readSync(uri, options.charset)
+    : readAsync(uri, options.charset);
 }
 
 exports.readURI = readURI;
+
+/**
+ * Reads a URI synchronously.
+ * This function is intentionally undocumented to favorites the `readURI` usage.
+ *
+ * @param uri {string} The URI to read
+ * @param [charset] {string} The character set to use when read the content of
+ *        the `uri` given.  By default is set to 'UTF-8'.
+ *
+ * @returns {string} The content of the URI given.
+ *
+ * @example
+ *  let data = readURISync('resource://gre/modules/NetUtil.jsm');
+ */
+function readURISync(uri, charset) {
+  charset = charset || "UTF-8";
+
+  let channel = NetUtil.newChannel(uri, charset, null);
+  let stream = channel.open();
+
+  let count = stream.available();
+  let data = NetUtil.readInputStreamToString(stream, count, { charset : charset });
+
+  stream.close();
+
+  return data;
+}
+
+exports.readURISync = readURISync;

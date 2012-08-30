@@ -41,6 +41,8 @@ const USER_SHEET = styleSheetService.USER_SHEET;
 const io = Cc['@mozilla.org/network/io-service;1'].
               getService(Ci.nsIIOService);
 
+const { readURISync } = require("api-utils/url/io");
+
 // contentStyle* / contentScript* are sharing the same validation constraints,
 // so they can be mostly reused, except for the messages.
 const validStyleOptions = {
@@ -76,20 +78,9 @@ const Rules = EventEmitter.resolve({ toString: null }).compose(List, {
 /**
  * Returns the content of the uri given
  */
-function readURI(uri) {
-  let channel = io.newChannel(uri, null, null);
-
-  let stream = Cc["@mozilla.org/scriptableinputstream;1"].
-                  createInstance(Ci.nsIScriptableInputStream);
-
-  stream.init(channel.open());
-
-  let data = stream.read(stream.available());
-
-  stream.close();
-
-  return data;
-}
+function readStylesheet(uri) {
+  return readURISync(uri);
+};
 
 /**
  * PageMod constructor (exported below).
@@ -135,7 +126,7 @@ const PageMod = Loader.compose(EventEmitter, {
     let styleRules = "";
 
     if (contentStyleFile)
-      styleRules = [].concat(contentStyleFile).map(readURI).join("");
+      styleRules = [].concat(contentStyleFile).map(readStylesheet).join("");
 
     if (contentStyle)
       styleRules += [].concat(contentStyle).join("");
